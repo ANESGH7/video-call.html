@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebRTC Video + Chat</title>
+<title>WebRTC Video Call + Chat</title>
 <style>
   body {
     font-family: sans-serif;
@@ -21,7 +21,7 @@
   input, button, textarea {
     font-size: 1em;
     padding: 10px;
-    margin: 10px 0;
+    margin: 10px 5px;
   }
   #chat {
     width: 90%;
@@ -35,13 +35,19 @@
     padding: 10px;
     white-space: pre-wrap;
   }
+  #status {
+    margin: 10px;
+    font-weight: bold;
+  }
 </style>
 </head>
 <body>
   <h2>WebRTC Video Call + Chat</h2>
 
   <input id="room" placeholder="Enter Room ID" />
-  <button onclick="start()">Join Room</button><br />
+  <button onclick="start()">Join Room</button>
+  <button onclick="createRoom()">Create Room</button>
+  <div id="status">Not connected</div>
 
   <video id="localVideo" autoplay muted playsinline></video>
   <video id="remoteVideo" autoplay playsinline></video>
@@ -53,10 +59,11 @@
   </div>
 
 <script>
-  let localVideo = document.getElementById('localVideo');
-  let remoteVideo = document.getElementById('remoteVideo');
-  let chatDiv = document.getElementById('chat');
-  let messageInput = document.getElementById('messageInput');
+  const localVideo = document.getElementById('localVideo');
+  const remoteVideo = document.getElementById('remoteVideo');
+  const chatDiv = document.getElementById('chat');
+  const messageInput = document.getElementById('messageInput');
+  const statusDiv = document.getElementById('status');
 
   let pc = null;
   let ws = null;
@@ -68,25 +75,40 @@
     chatDiv.scrollTop = chatDiv.scrollHeight;
   }
 
+  function setStatus(msg) {
+    statusDiv.textContent = msg;
+  }
+
+  function createRoom() {
+    const newRoom = Math.random().toString(36).substring(2, 8);
+    document.getElementById('room').value = newRoom;
+    start();
+  }
+
   async function start() {
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    pc = null;
+    remoteVideo.srcObject = null;
+    chatDiv.textContent = '';
     room = document.getElementById('room').value.trim();
     if (!room) {
       alert('Please enter a room ID');
       return;
     }
 
+    setStatus('Connecting to signaling server...');
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = stream;
 
-      // WebSocket connection (relative URL to support deployment)
-      const loc = window.location;
-      const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = wsProtocol + '//' + loc.host;
-      ws = new WebSocket(wsUrl);
+      ws = new WebSocket('wss://webrtc-video-call-19l8.onrender.com');
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        setStatus('Connected to signaling server. Joining room: ' + room);
         ws.send(JSON.stringify({ type: 'join', room }));
       };
 
@@ -97,6 +119,7 @@
         if (msg.type === 'full') {
           alert('Room is full. Only 2 users allowed.');
           ws.close();
+          setStatus('Room is full');
           return;
         }
 
@@ -128,12 +151,20 @@
         }
       };
 
-      ws.onclose = () => console.log('WebSocket closed');
-      ws.onerror = (err) => console.error('WebSocket error', err);
+      ws.onclose = () => {
+        setStatus('Disconnected from signaling server');
+        console.log('WebSocket closed');
+      };
+
+      ws.onerror = (err) => {
+        setStatus('WebSocket error');
+        console.error('WebSocket error', err);
+      };
 
       initPeer(stream);
     } catch (err) {
       alert('Error accessing camera/mic: ' + err.message);
+      setStatus('Error accessing camera/mic');
     }
   }
 
@@ -145,7 +176,7 @@
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
+      if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'signal', room, data: { candidate: e.candidate } }));
       }
     };
@@ -160,7 +191,9 @@
   async function createOffer() {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
+    }
   }
 
   function sendMessage() {
