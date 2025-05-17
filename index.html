@@ -1,114 +1,123 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebRTC Binary Signaling Demo</title>
-<style>
-  video { width: 45%; margin: 5px; background: #000; }
-</style>
+  <title>Binary WebRTC Video Call</title>
+  <style>
+    video { width: 300px; border: 1px solid black; margin: 5px; }
+  </style>
 </head>
 <body>
+  <h2>Binary WebRTC Video Call</h2>
+  <video id="localVideo" autoplay muted playsinline></video>
+  <video id="remoteVideo" autoplay playsinline></video>
 
-<h2>WebRTC Video Call (Binary Signaling)</h2>
+  <script>
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
 
-<video id="localVideo" autoplay muted playsinline></video>
-<video id="remoteVideo" autoplay playsinline></video>
+    let localStream;
+    let pc;
+    let isCaller = false;
 
-<script>
-const localVideo = document.getElementById('localVideo');
-const remoteVideo = document.getElementById('remoteVideo');
+    const room = prompt('Enter room name:', 'testroom');
+    const ws = new WebSocket('wss://webrtc-video-call-19l8.onrender.com');
 
-let localStream;
-let pc;
-
-const room = prompt('Enter room name:', 'testroom');
-const ws = new WebSocket('ws://localhost:10000');
-
-function jsonToBuffer(json) {
-  return new TextEncoder().encode(JSON.stringify(json));
-}
-
-function bufferToJson(buffer) {
-  return JSON.parse(new TextDecoder().decode(buffer));
-}
-
-ws.binaryType = 'arraybuffer';
-
-ws.onopen = () => {
-  console.log('WebSocket connected');
-  ws.send(jsonToBuffer({ type: 'join', room }));
-};
-
-ws.onmessage = async (event) => {
-  let message;
-  if (event.data instanceof ArrayBuffer) {
-    message = bufferToJson(event.data);
-  } else if (event.data instanceof Blob) {
-    const arrayBuffer = await event.data.arrayBuffer();
-    message = bufferToJson(arrayBuffer);
-  } else {
-    message = JSON.parse(event.data);
-  }
-
-  if (message.type === 'signal') {
-    await handleSignal(message.data);
-  }
-};
-
-async function handleSignal(data) {
-  if (data.sdp) {
-    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-    if (data.sdp.type === 'offer') {
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      sendSignal({ sdp: pc.localDescription });
+    function jsonToBuffer(json) {
+      return new TextEncoder().encode(JSON.stringify(json));
     }
-  } else if (data.candidate) {
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-    } catch (e) {
-      console.error('Error adding ICE candidate:', e);
+
+    function bufferToJson(buffer) {
+      return JSON.parse(new TextDecoder().decode(buffer));
     }
-  }
-}
 
-function sendSignal(data) {
-  ws.send(jsonToBuffer({ type: 'signal', data }));
-}
+    ws.binaryType = 'arraybuffer';
 
-async function start() {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  localVideo.srcObject = localStream;
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+      ws.send(jsonToBuffer({ type: 'join', room }));
+    };
 
-  pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-  });
+    ws.onmessage = async (event) => {
+      let message;
+      if (event.data instanceof ArrayBuffer) {
+        message = bufferToJson(event.data);
+      } else if (event.data instanceof Blob) {
+        const arrayBuffer = await event.data.arrayBuffer();
+        message = bufferToJson(arrayBuffer);
+      } else {
+        message = JSON.parse(event.data);
+      }
 
-  // Add local tracks to peer connection
-  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      console.log("Received signaling message:", message);
 
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      sendSignal({ candidate: event.candidate });
+      if (message.type === 'signal') {
+        await handleSignal(message.data);
+      } else if (message.type === 'joined') {
+        // Server join confirmation with user count
+        if (message.users === 1) {
+          // First user to join - caller
+          isCaller = true;
+          startCall();
+        }
+      }
+    };
+
+    function sendSignal(data) {
+      console.log("Sending signaling message:", data);
+      ws.send(jsonToBuffer({ type: 'signal', data }));
     }
-  };
 
-  pc.ontrack = (event) => {
-    if (!remoteVideo.srcObject) {
-      remoteVideo.srcObject = event.streams[0];
+    async function handleSignal(data) {
+      if (!pc) {
+        await startCall(false);
+      }
+
+      if (data.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        if (data.sdp.type === 'offer') {
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendSignal({ sdp: pc.localDescription });
+        }
+      } else if (data.candidate) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (e) {
+          console.error('Error adding ICE candidate:', e);
+        }
+      }
     }
-  };
 
-  if (room) {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    sendSignal({ sdp: pc.localDescription });
-  }
-}
+    async function startCall(makeOffer = true) {
+      if (!localStream) {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+      }
 
-start();
-</script>
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
 
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendSignal({ candidate: event.candidate });
+        }
+      };
+
+      pc.ontrack = (event) => {
+        if (!remoteVideo.srcObject) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      };
+
+      if (makeOffer) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendSignal({ sdp: pc.localDescription });
+      }
+    }
+  </script>
 </body>
 </html>
