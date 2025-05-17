@@ -3,230 +3,112 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebRTC Video Call + Chat</title>
+<title>WebRTC Binary Signaling Demo</title>
 <style>
-  body {
-    font-family: sans-serif;
-    text-align: center;
-    background: #f0f0f0;
-    margin: 0; padding: 20px;
-  }
-  video {
-    width: 45%;
-    margin: 10px;
-    border: 2px solid #ccc;
-    border-radius: 10px;
-    background: black;
-  }
-  input, button, textarea {
-    font-size: 1em;
-    padding: 10px;
-    margin: 10px 5px;
-  }
-  #chat {
-    width: 90%;
-    height: 150px;
-    margin: 10px auto;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-    background: white;
-    overflow-y: auto;
-    text-align: left;
-    padding: 10px;
-    white-space: pre-wrap;
-  }
-  #status {
-    margin: 10px;
-    font-weight: bold;
-  }
+  video { width: 45%; margin: 5px; background: #000; }
 </style>
 </head>
 <body>
-  <h2>WebRTC Video Call + Chat</h2>
 
-  <input id="room" placeholder="Enter Room ID" />
-  <button onclick="start()">Join Room</button>
-  <button onclick="createRoom()">Create Room</button>
-  <div id="status">Not connected</div>
+<h2>WebRTC Video Call (Binary Signaling)</h2>
 
-  <video id="localVideo" autoplay muted playsinline></video>
-  <video id="remoteVideo" autoplay playsinline></video>
-
-  <div>
-    <div id="chat"></div>
-    <input id="messageInput" type="text" placeholder="Type a message..." />
-    <button onclick="sendMessage()">Send</button>
-  </div>
+<video id="localVideo" autoplay muted playsinline></video>
+<video id="remoteVideo" autoplay playsinline></video>
 
 <script>
-  const localVideo = document.getElementById('localVideo');
-  const remoteVideo = document.getElementById('remoteVideo');
-  const chatDiv = document.getElementById('chat');
-  const messageInput = document.getElementById('messageInput');
-  const statusDiv = document.getElementById('status');
+const localVideo = document.getElementById('localVideo');
+const remoteVideo = document.getElementById('remoteVideo');
 
-  let pc = null;
-  let ws = null;
-  let room = '';
-  let localStream = null;
+let localStream;
+let pc;
 
-  function appendChat(msg, fromSelf = false) {
-    const prefix = fromSelf ? 'You: ' : 'Peer: ';
-    chatDiv.textContent += prefix + msg + '\n';
-    chatDiv.scrollTop = chatDiv.scrollHeight;
+const room = prompt('Enter room name:', 'testroom');
+const ws = new WebSocket('ws://localhost:10000');
+
+function jsonToBuffer(json) {
+  return new TextEncoder().encode(JSON.stringify(json));
+}
+
+function bufferToJson(buffer) {
+  return JSON.parse(new TextDecoder().decode(buffer));
+}
+
+ws.binaryType = 'arraybuffer';
+
+ws.onopen = () => {
+  console.log('WebSocket connected');
+  ws.send(jsonToBuffer({ type: 'join', room }));
+};
+
+ws.onmessage = async (event) => {
+  let message;
+  if (event.data instanceof ArrayBuffer) {
+    message = bufferToJson(event.data);
+  } else if (event.data instanceof Blob) {
+    const arrayBuffer = await event.data.arrayBuffer();
+    message = bufferToJson(arrayBuffer);
+  } else {
+    message = JSON.parse(event.data);
   }
 
-  function setStatus(msg) {
-    statusDiv.textContent = msg;
+  if (message.type === 'signal') {
+    await handleSignal(message.data);
   }
+};
 
-  function createRoom() {
-    const newRoom = Math.random().toString(36).substring(2, 8);
-    document.getElementById('room').value = newRoom;
-    start();
-  }
-
-  async function start() {
-    if (ws) {
-      ws.close();
-      ws = null;
+async function handleSignal(data) {
+  if (data.sdp) {
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    if (data.sdp.type === 'offer') {
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendSignal({ sdp: pc.localDescription });
     }
-    if (pc) {
-      pc.close();
-      pc = null;
-    }
-    remoteVideo.srcObject = null;
-    chatDiv.textContent = '';
-    room = document.getElementById('room').value.trim();
-    if (!room) {
-      alert('Please enter a room ID');
-      return;
-    }
-
-    setStatus('Connecting to signaling server...');
-
+  } else if (data.candidate) {
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
-
-      ws = new WebSocket('wss://webrtc-video-call-19l8.onrender.com');
-
-      ws.onopen = () => {
-        setStatus('Connected to signaling server. Joining room: ' + room);
-        ws.send(JSON.stringify({ type: 'join', room }));
-      };
-
-      ws.onmessage = async (event) => {
-        const msg = JSON.parse(event.data);
-        console.log('WS message:', msg);
-
-        if (msg.type === 'full') {
-          alert('Room is full. Only 2 users allowed.');
-          ws.close();
-          setStatus('Room is full');
-          return;
-        }
-
-        if (msg.type === 'join') {
-          if (msg.id === 2) {
-            // Second user, create offer
-            await createOffer();
-          }
-        }
-
-        if (msg.type === 'signal') {
-          if (msg.data.sdp) {
-            await pc.setRemoteDescription(new RTCSessionDescription(msg.data.sdp));
-            if (msg.data.sdp.type === 'offer') {
-              const answer = await pc.createAnswer();
-              await pc.setLocalDescription(answer);
-              ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
-            }
-          } else if (msg.data.candidate) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(msg.data.candidate));
-            } catch (e) {
-              console.error('Error adding ICE candidate:', e);
-            }
-          }
-        }
-
-        if (msg.type === 'chat') {
-          appendChat(msg.message, false);
-        }
-      };
-
-      ws.onclose = () => {
-        setStatus('Disconnected from signaling server');
-        console.log('WebSocket closed');
-      };
-
-      ws.onerror = (err) => {
-        setStatus('WebSocket error');
-        console.error('WebSocket error', err);
-      };
-
-      initPeer(localStream);
-    } catch (err) {
-      alert('Error accessing camera/mic: ' + err.message);
-      setStatus('Error accessing camera/mic');
+      await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+    } catch (e) {
+      console.error('Error adding ICE candidate:', e);
     }
   }
+}
 
-  function initPeer(stream) {
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    });
+function sendSignal(data) {
+  ws.send(jsonToBuffer({ type: 'signal', data }));
+}
 
-    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+async function start() {
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  localVideo.srcObject = localStream;
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'signal', room, data: { candidate: e.candidate } }));
-      }
-    };
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
 
-    pc.ontrack = (e) => {
-      console.log('Track event:', e);
-      // Append incoming tracks to remote stream
-      if (!remoteVideo.srcObject) {
-        remoteVideo.srcObject = e.streams[0];
-      }
-    };
+  // Add local tracks to peer connection
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-    pc.onnegotiationneeded = async () => {
-      try {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
-        }
-      } catch (err) {
-        console.error('Negotiation error:', err);
-      }
-    };
-  }
-
-  async function createOffer() {
-    if (!pc) return;
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
-      }
-    } catch (err) {
-      console.error('Failed to create offer:', err);
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      sendSignal({ candidate: event.candidate });
     }
-  }
+  };
 
-  function sendMessage() {
-    const text = messageInput.value.trim();
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-    appendChat(text, true);
-    ws.send(JSON.stringify({ type: 'chat', room, message: text }));
-    messageInput.value = '';
+  pc.ontrack = (event) => {
+    if (!remoteVideo.srcObject) {
+      remoteVideo.srcObject = event.streams[0];
+    }
+  };
+
+  if (room) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sendSignal({ sdp: pc.localDescription });
   }
+}
+
+start();
 </script>
+
 </body>
 </html>
