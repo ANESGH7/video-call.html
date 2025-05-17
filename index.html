@@ -68,6 +68,7 @@
   let pc = null;
   let ws = null;
   let room = '';
+  let localStream = null;
 
   function appendChat(msg, fromSelf = false) {
     const prefix = fromSelf ? 'You: ' : 'Peer: ';
@@ -90,7 +91,10 @@
       ws.close();
       ws = null;
     }
-    pc = null;
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
     remoteVideo.srcObject = null;
     chatDiv.textContent = '';
     room = document.getElementById('room').value.trim();
@@ -102,8 +106,8 @@
     setStatus('Connecting to signaling server...');
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = stream;
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
 
       ws = new WebSocket('wss://webrtc-video-call-19l8.onrender.com');
 
@@ -125,6 +129,7 @@
 
         if (msg.type === 'join') {
           if (msg.id === 2) {
+            // Second user, create offer
             await createOffer();
           }
         }
@@ -161,7 +166,7 @@
         console.error('WebSocket error', err);
       };
 
-      initPeer(stream);
+      initPeer(localStream);
     } catch (err) {
       alert('Error accessing camera/mic: ' + err.message);
       setStatus('Error accessing camera/mic');
@@ -182,17 +187,36 @@
     };
 
     pc.ontrack = (e) => {
+      console.log('Track event:', e);
+      // Append incoming tracks to remote stream
       if (!remoteVideo.srcObject) {
         remoteVideo.srcObject = e.streams[0];
+      }
+    };
+
+    pc.onnegotiationneeded = async () => {
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
+        }
+      } catch (err) {
+        console.error('Negotiation error:', err);
       }
     };
   }
 
   async function createOffer() {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
+    if (!pc) return;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'signal', room, data: { sdp: pc.localDescription } }));
+      }
+    } catch (err) {
+      console.error('Failed to create offer:', err);
     }
   }
 
